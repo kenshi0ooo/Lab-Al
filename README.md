@@ -1,0 +1,248 @@
+﻿# Лабораторная работа: конечный автомат поведения врагов в Unity
+
+> **Статус:** отчёт подготовлен по предоставленным скриптам `NormalEnemyAI.cs`, `TeleportEnemyAI.cs` и `PlayerController.cs`. Условие из методички не предоставлено, поэтому цель ниже сформулирована по реализации и при необходимости заменяется официальной формулировкой.
+
+## 1. Цель работы и постановка задачи
+
+**Цель:** реализовать и сравнить поведение игрового персонажа и двух типов врагов в Unity с помощью конечного автомата состояний (FSM): обычного врага, который патрулирует, обнаруживает и преследует игрока, атакует его и ищет после потери видимости, и врага с дополнительным состоянием телепортации.
+
+**Задачи по представленным скриптам:**
+
+- реализовать управление игроком с клавиатуры и геймпада;
+- организовать логику врагов как набор состояний с переходами по условиям;
+- реализовать обнаружение игрока обычным врагом с проверкой расстояния, угла обзора и препятствий;
+- реализовать периодическое круговое обнаружение игрока телепортирующимся врагом;
+- реализовать перемещение по точкам патруля, атаку, поиск игрока и телепортацию;
+- визуализировать в редакторе Unity радиусы обнаружения и атаки.
+
+*Если в методичке приведена точная цель или обязательные требования, замените этот раздел их формулировкой.*
+
+## 2. Архитектура AI и FSM
+
+В обоих скриптах конечный автомат реализован непосредственно внутри компонента `MonoBehaviour`: перечисление `State` задаёт возможные состояния, поле `currentState` хранит текущее состояние, а `Update()` вызывает соответствующий метод поведения. Переходы выполняются методом `ChangeState`. Отдельных классов `Idle`, `Patrol`, `Chase`, `Attack`, `Search` или самостоятельного класса FSM в предоставленных файлах нет: логика каждого состояния оформлена отдельным методом `...Update()`.
+
+### 2.1 Обычный враг (`NormalEnemyAI`)
+
+| Текущее состояние | Условие | Следующее состояние / действие |
+|---|---|---|
+| `Idle` | Игрок виден | `Chase` |
+| `Idle` | Истёк таймер ожидания | `Patrol` |
+| `Patrol` | Игрок виден | `Chase` |
+| `Patrol` | Нет назначенных точек патруля | `Idle` |
+| `Patrol` | Достигнута текущая точка (дистанция меньше 0,2) | Следующая точка по кругу, затем `Idle` |
+| `Chase` | Игрок виден и дальше радиуса атаки | Обновить запомненную позицию игрока и двигаться к ней; остаться в `Chase` |
+| `Chase` | Игрок виден и в радиусе атаки | `Attack` |
+| `Chase` | Игрок не виден | `Search` |
+| `Attack` | Игрок отсутствует | `Patrol` |
+| `Attack` | Игрок вышел за радиус атаки | `Chase` |
+| `Attack` | Игрок в радиусе и прошёл cooldown атаки | Выполнить `DoAttack()`, остаться в `Attack` |
+| `Search` | Игрок снова виден | `Chase` |
+| `Search` | Враг ещё не дошёл до последней известной позиции | Двигаться к ней, остаться в `Search` |
+| `Search` | Враг на последней известной позиции и таймер истёк | `Patrol` |
+
+Обнаружение обычного врага ограничено дистанцией `viewDistance` и сектором обзора `viewAngle`, ориентированным по вектору `facing`. Луч `Physics2D.Raycast` проверяет линию до игрока с учётом слоёв препятствий и игрока. Начальные сериализуемые значения: скорость 3, дистанция обзора 7, угол обзора 180°, радиус атаки 1,2, cooldown атаки 1,5 с, ожидание у точки 1,5 с, поиск 3 с, урон 10.
+
+### 2.2 Телепортирующийся враг (`TeleportEnemyAI`)
+
+| Текущее состояние | Условие | Следующее состояние / действие |
+|---|---|---|
+| `Idle` | Игрок найден `Scan360()` | `Chase` |
+| `Idle` | Истёк таймер ожидания | `Patrol` |
+| `Patrol` | Игрок найден `Scan360()` | `Chase` |
+| `Patrol` | Нет точек патруля | `Idle` |
+| `Patrol` | Достигнута точка | Следующая точка по кругу, затем `Idle` |
+| `Chase` | Игрок не найден | `Search` |
+| `Chase` | Игрок найден на расстоянии не больше `attackRange` | `Attack` |
+| `Chase` | Игрок найден дальше радиуса атаки, cooldown телепорта истёк и дистанция больше 2,5 | `Teleport` |
+| `Chase` | Игрок найден, но условие телепортации не выполнено | Двигаться к последней известной позиции игрока |
+| `Attack` | Игрок отсутствует | `Patrol` |
+| `Attack` | Игрок дальше радиуса атаки | `Chase` |
+| `Attack` | Прошёл cooldown атаки | Выполнить `DoAttack()`, остаться в `Attack` |
+| `Search` | Игрок снова найден | `Chase` |
+| `Search` | Игрок не найден, враг ещё не у последней известной позиции | Двигаться к ней |
+| `Search` | Враг у последней известной позиции и таймер истёк | `Patrol` |
+| `Teleport` | Состояние выполняется | `PerformTeleport()`, обновить время телепорта, затем `Chase` |
+
+`Scan360()` периодически проверяет расстояние до игрока и препятствие лучом, без проверки направления взгляда. Начальные значения: радиус сканирования 1, интервал 0,5 с, радиус атаки 1,2, cooldown атаки 1,5 с, поиск 3 с, урон 15, cooldown телепорта 5 с, максимальная дальность телепорта 4.
+
+### 2.3 Условие телепортации и важное замечание
+
+В `ChaseUpdate()` телепортация задумана, когда игрок обнаружен, находится дальше 2,5 единиц, враг ещё не достиг радиуса атаки, а cooldown телепорта прошёл (`Time.time >= lastTpTime + tpCooldown`). Выбраны дистанционный порог и cooldown: порог оставляет телепортацию для удалённой цели, а cooldown ограничивает частоту способности. После выполнения телепорта враг возвращается в `Chase`.
+
+**В предоставленных настройках есть логическое несоответствие:** `Scan360()` возвращает обнаружение только при `dist <= scanRadius`, где `scanRadius` по умолчанию равен 1. В `ChaseUpdate()` условие атаки проверяется раньше телепортации, а радиус атаки равен 1,2. Поэтому при значениях по умолчанию случай `dist > 2.5` не может дойти до условия телепортации: цель уже вне радиуса `Scan360()`. Для срабатывания задуманного поведения потребуется согласовать радиус сканирования с дистанционным порогом телепорта (и учесть линию видимости), либо изменить условие обнаружения/запуска телепорта. Код намеренно не изменялся; это замечание фиксирует поведение именно предоставленной версии.
+
+При телепортации точка назначения рассчитывается в направлении игрока на расстоянии `maxTpDistance`. Если луч находит препятствие, точка переносится на 0,5 единицы перед точкой столкновения. Затем обновляются `transform.position` и позиция `Rigidbody2D`, если компонент присутствует.
+
+## 3. Описание реализации и ключевые листинги
+
+### 3.1 Перечисление состояний и диспетчер FSM
+
+Обычный враг объявляет состояния:
+
+```csharp
+public enum State { Idle, Patrol, Chase, Attack, Search }
+```
+
+Телепортирующийся добавляет `Teleport`:
+
+```csharp
+public enum State { Idle, Patrol, Chase, Attack, Search, Teleport }
+```
+
+Диспетчер в `Update()` выбирает поведение по текущему состоянию. Пример для обычного врага:
+
+```csharp
+void Update()
+{
+    switch (currentState)
+    {
+        case State.Idle:   IdleUpdate(); break;
+        case State.Patrol: PatrolUpdate(); break;
+        case State.Chase:  ChaseUpdate(); break;
+        case State.Attack: AttackUpdate(); break;
+        case State.Search: SearchUpdate(); break;
+    }
+}
+```
+
+Смена состояния и установка таймеров:
+
+```csharp
+void ChangeState(State newState)
+{
+    currentState = newState;
+    if (newState == State.Search) stateTimer = searchDuration;
+    if (newState == State.Idle) stateTimer = waitAtPatrolPoint;
+}
+```
+
+### 3.2 Патрулирование и обнаружение обычным врагом
+
+Враг проходит массив `patrolPoints` по кругу. Если точек нет, переходит в ожидание. Видимость игрока проверяется расстоянием, углом относительно `facing` и лучом до цели:
+
+```csharp
+bool SeePlayer()
+{
+    if (playerTransform == null) return false;
+    var toPlayer = (Vector2)playerTransform.position - (Vector2)transform.position;
+    float dist = toPlayer.magnitude;
+
+    if (dist > viewDistance) return false;
+    if (Vector2.Angle(facing, toPlayer) > viewAngle * 0.5f) return false;
+
+    var hit = Physics2D.Raycast(transform.position, toPlayer.normalized,
+                                dist, obstacleLayer | playerLayer);
+    return hit.collider != null && hit.collider.transform == playerTransform;
+}
+```
+
+### 3.3 Преследование и поиск
+
+При видимом игроке враг запоминает его позицию. Если цель потеряна, `Search` ведёт врага к последней известной позиции; достигнув её, враг ждёт до окончания таймера или переходит в `Chase`, если игрок найден повторно.
+
+```csharp
+void ChaseUpdate()
+{
+    if (SeePlayer())
+    {
+        lastKnownPos = playerTransform.position;
+        if (Vector2.Distance(transform.position, lastKnownPos) <= attackRange)
+        {
+            ChangeState(State.Attack);
+            return;
+        }
+        MoveTo(lastKnownPos);
+    }
+    else ChangeState(State.Search);
+}
+```
+
+### 3.4 Атака
+
+Атака выполняется не чаще заданного `attackCooldown`. В предоставленной версии `DoAttack()` выводит сообщение в Console и запускает визуальную вспышку спрайта; отдельного нанесения урона объекту игрока в этих скриптах нет.
+
+```csharp
+if (Time.time >= lastAttack + attackCooldown)
+{
+    DoAttack();
+    lastAttack = Time.time;
+}
+```
+
+### 3.5 Круговое сканирование (`Scan360`)
+
+Телепортирующийся враг не использует угол обзора: периодически проверяет расстояние в радиусе `scanRadius` и лучом проверяет, что между врагом и игроком нет преграды. Между проверками, находясь в `Chase`, функция возвращает `true`, что позволяет продолжать погоню в пределах интервала сканирования.
+
+```csharp
+bool Scan360()
+{
+    if (playerTransform == null) return false;
+
+    if (Time.time < lastScanTime + scanInterval)
+        return currentState == State.Chase;
+    lastScanTime = Time.time;
+
+    var toPlayer = (Vector2)playerTransform.position - (Vector2)transform.position;
+    float dist = toPlayer.magnitude;
+    if (dist > scanRadius) return false;
+
+    var hit = Physics2D.Raycast(transform.position, toPlayer.normalized,
+                                dist, obstacleLayer | playerLayer);
+    return hit.collider != null && hit.collider.transform == playerTransform;
+}
+```
+
+### 3.6 Телепортация (`PerformTeleport`)
+
+```csharp
+Vector2 dirToPlayer = ((Vector2)playerTransform.position -
+                       (Vector2)transform.position).normalized;
+Vector2 targetTpPos = (Vector2)transform.position + dirToPlayer * maxTpDistance;
+
+RaycastHit2D hit = Physics2D.Raycast(transform.position, dirToPlayer,
+                                     maxTpDistance, obstacleLayer);
+if (hit.collider != null)
+    targetTpPos = hit.point - dirToPlayer * 0.5f;
+
+transform.position = targetTpPos;
+if (rb != null) rb.position = targetTpPos;
+```
+
+### 3.7 Управление игроком (`PlayerController`)
+
+Ввод по горизонтали и вертикали считывается через `Input.GetAxisRaw`, вектор нормализуется, чтобы диагональное движение не было быстрее. Перемещение выполняется в `FixedUpdate()` через `Rigidbody2D.MovePosition`.
+
+```csharp
+movement.x = Input.GetAxisRaw("Horizontal");
+movement.y = Input.GetAxisRaw("Vertical");
+movement = movement.normalized;
+
+// В FixedUpdate:
+rb.MovePosition(rb.position + movement * moveSpeed * Time.fixedDeltaTime);
+```
+
+## 4. Настройка сцены Unity
+
+Для работы предоставленной логики на объектах должны быть настроены соответствующие компоненты и данные сцены:
+
+- игрок с тегом `Player` (если `playerTransform` не назначен вручную);
+- `Rigidbody2D` на игроке для `PlayerController`;
+- `Rigidbody2D` и/или `SpriteRenderer` на врагах (скрипты допускают отсутствие этих компонентов для перемещения/эффектов, но игроку `PlayerController` ожидает `Rigidbody2D`);
+- массив `patrolPoints` с Transform-точками маршрута;
+- слои `playerLayer` и `obstacleLayer`, корректно назначенные в Inspector;
+- параметры дистанции, угла, cooldown и скорости, проверенные в Inspector.
+
+## 5. Файлы реализации
+
+- `Assets/Scripts/NormalEnemyAI.cs` — FSM обычного врага.
+- `Assets/Scripts/TeleportEnemyAI.cs` — FSM врага с телепортацией и круговым сканированием.
+- `Assets/Scripts/PlayerController.cs` — управление игроком.
+
+Файлы `.meta` нужны Unity для идентификации ресурсов внутри проекта; для описания логики работы они отдельно не рассматриваются.
+## 6. Видеоматериалы
+
+После загрузки этих файлов в корень репозитория видео будут доступны по ссылкам:
+
+- [Запись экрана](screen-recording.mp4)
+- [Video Project 3](video-project-3.mp4)
+
